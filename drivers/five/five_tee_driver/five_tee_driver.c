@@ -18,9 +18,10 @@
 #include <linux/debugfs.h>
 #include <linux/slab.h>
 #include <linux/kthread.h>
-#include <five_tee_driver.h>
+#include <five_tee_interface.h>
 #include "tee_client_api.h"
 #include "five_ta_uuid.h"
+#include "five_audit.h"
 
 #ifdef CONFIG_TEE_DRIVER_DEBUG
 #include <linux/uaccess.h>
@@ -43,6 +44,8 @@ struct tci_msg {
 
 #define CMD_SIGN   1
 #define CMD_VERIFY 2
+
+#define SEND_CMD_RETRY 1
 
 static int load_trusted_app(void);
 static void unload_trusted_app(void);
@@ -87,8 +90,8 @@ static int initialize_trusted_app(void)
 
 	wait_for_completion(&ta_loaded);
 	ret = kthread_stop(tsk);
-	is_initialized = ret == 0 ? 1 : 0;
-	pr_info("FIVE: Initialized trusted app ret: %d\n", ret);
+	pr_info("FIVE: Initialized trusted app ret: %d initialized: %u\n",
+							ret, is_initialized);
 
 	return ret;
 }
@@ -178,8 +181,16 @@ static int send_cmd(unsigned int cmd,
 
 	mutex_unlock(&itee_driver_lock);
 
-	if (rc == TEEC_SUCCESS && origin != TEEC_ORIGIN_TRUSTED_APP)
-		rc = -EIO;
+	if (rc == TEEC_SUCCESS) {
+		if (origin != TEEC_ORIGIN_TRUSTED_APP) {
+			rc = -EIO;
+			five_audit_tee_msg("send_cmd",
+				"TEEC_InvokeCommand is failed", rc, origin);
+		}
+	} else {
+		five_audit_tee_msg("send_cmd", "TEEC_InvokeCommand is failed.",
+								 rc, origin);
+	}
 
 	if (rc == TEEC_SUCCESS && cmd == CMD_SIGN) {
 		memcpy(signature, msg->signature, sig_len);
@@ -213,11 +224,16 @@ static int send_cmd_with_retry(unsigned int cmd,
 		need_retry = (rc == TEEC_ERROR_COMMUNICATION ||
 						rc == TEEC_ERROR_TARGET_DEAD);
 		if (need_retry && retry_num) {
-			pr_err("FIVE: TA got the fatal error rc=%d. Try again\n",
+			if (rc == TEEC_ERROR_ACCESS_DENIED) {
+				five_audit_tee_msg("send_cmd_with_retry",
+				"TA got TEEC_ERROR_ACCESS_DENIED", rc, 0);
+			} else {
+				pr_err("FIVE: TA got the fatal error rc=%d. Try again\n",
 									rc);
-			mutex_lock(&itee_driver_lock);
-			unload_trusted_app();
-			mutex_unlock(&itee_driver_lock);
+				mutex_lock(&itee_driver_lock);
+				unload_trusted_app();
+				mutex_unlock(&itee_driver_lock);
+			}
 		} else {
 			break;
 		}
@@ -232,7 +248,8 @@ static int verify_hmac(enum hash_algo algo, const void *hash, size_t hash_len,
 {
 	return send_cmd_with_retry(CMD_VERIFY, algo,
 					hash, hash_len, label, label_len,
-					(void *)signature, &signature_len, 1);
+					(void *)signature, &signature_len,
+					SEND_CMD_RETRY);
 }
 
 static int sign_hmac(enum hash_algo algo, const void *hash, size_t hash_len,
@@ -241,7 +258,8 @@ static int sign_hmac(enum hash_algo algo, const void *hash, size_t hash_len,
 {
 	return send_cmd_with_retry(CMD_SIGN, algo,
 					hash, hash_len, label, label_len,
-					signature, signature_len, 1);
+					signature, signature_len,
+					SEND_CMD_RETRY);
 }
 
 static int load_trusted_app(void)
@@ -257,7 +275,8 @@ static int load_trusted_app(void)
 
 	rc = TEEC_InitializeContext(NULL, context);
 	if (rc) {
-		pr_err("FIVE: Can't initialize context rc=0x%x\n", rc);
+		five_audit_tee_msg("load_trusted_app", "Can't initialize context",
+									rc, 0);
 		goto error;
 	}
 
@@ -270,8 +289,8 @@ static int load_trusted_app(void)
 	rc = TEEC_OpenSession(context, session,
 				&five_ta_uuid, 0, NULL, NULL, &origin);
 	if (rc) {
-		pr_err("FIVE: Can't open session rc=0x%x origin=0x%x\n",
-				rc, origin);
+		five_audit_tee_msg("load_trusted_app", "Can't open session",
+								rc, origin);
 		goto error;
 	}
 
@@ -391,9 +410,28 @@ static inline int __init init_fs(void)
 
 static int __init tee_driver_init(void)
 {
+	int rc = 0;
+
 	mutex_init(&itee_driver_lock);
-	register_tee_driver();
-	return init_fs();
+
+#ifdef CONFIG_FIVE_EARLY_LOAD_TRUSTED_APP
+	rc = load_trusted_app();
+	pr_info("FIVE: Initialize trusted app in early boot ret: %d\n", rc);
+#endif
+
+	rc = register_tee_driver();
+	if (rc) {
+		pr_err("FIVE: Can't register tee_driver\n");
+		goto out;
+	}
+	rc = init_fs();
+	if (rc) {
+		pr_err("FIVE: Can't initialize debug FS\n");
+		goto out;
+	}
+
+out:
+	return rc;
 }
 
 static void __exit tee_driver_exit(void)

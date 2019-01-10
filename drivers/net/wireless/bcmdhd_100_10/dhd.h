@@ -27,7 +27,7 @@
  *
  * <<Broadcom-WL-IPTag/Open:>>
  *
- * $Id: dhd.h 767554 2018-06-14 06:37:31Z $
+ * $Id: dhd.h 795949 2018-12-20 11:06:23Z $
  */
 
 /****************
@@ -88,6 +88,8 @@ int get_scheduler_policy(struct task_struct *p);
 #ifdef DHD_ERPOM
 #include <pom.h>
 #endif /* DHD_ERPOM */
+
+#include <dngl_stats.h>
 
 #ifdef DEBUG_DPC_THREAD_WATCHDOG
 #define MAX_RESCHED_CNT 600
@@ -286,9 +288,10 @@ typedef enum download_type {
 } download_type_t;
 
 /* For supporting multiple interfaces */
-#define DHD_MAX_IFS	16
-#define DHD_DEL_IF	-0xE
-#define DHD_BAD_IF	-0xF
+#define DHD_MAX_IFS			16
+#define DHD_MAX_STATIC_IFS	1
+#define DHD_DEL_IF		-0xE
+#define DHD_BAD_IF		-0xF
 #define DHD_DUMMY_INFO_IF	0xDEAF	/* Hack i/f to handle events from INFO Ring */
 #define DHD_EVENT_IF DHD_DUMMY_INFO_IF
 
@@ -719,7 +722,21 @@ extern void copy_debug_dump_time(char *dest, char *src);
 #define WL_MAX_PRESERVE_BUFFER	8
 #define FW_LOGSET_MASK_ALL 0xFF
 
+#ifdef WL_MONITOR
+#define MONPKT_EXTRA_LEN	48u
+#endif /* WL_MONITOR */
+
+#define DHDIF_FWDER(dhdif)      FALSE
+
 #if defined(CUSTOMER_HW4)
+#if defined(ANDROID_PLATFORM_VERSION)
+#if (ANDROID_PLATFORM_VERSION >= 9)
+#ifdef DHD_COMMON_DUMP_PATH
+#undef DHD_COMMON_DUMP_PATH
+#endif /* DHD_COMMON_DUMP_PATH */
+#define DHD_COMMON_DUMP_PATH	"/data/vendor/log/wifi/"
+#endif /* ANDROID_PLATFORM_VERSION >= 9 */
+#endif /* ANDROID_PLATFORM_VERSION */
 #ifndef DHD_COMMON_DUMP_PATH
 #define DHD_COMMON_DUMP_PATH	"/data/media/wifi/log/"
 #endif /* !DHD_COMMON_DUMP_PATH */
@@ -1177,12 +1194,14 @@ typedef struct dhd_pub {
 	int (*pom_func_deregister)(pom_func_handler_t *func);
 	int (*pom_toggle_reg_on)(uchar func_id, uchar reason);
 #endif /* DHD_ERPOM */
-#ifdef DHD_TID_MODE
-	int changeTIDmode;
-	int changeTIDtid;
-	uint32 changeTIDuid;
-	uint32 changeTIDdestip;
-#endif // endif
+#ifdef SUPPORT_SET_TID
+	uint8 tid_mode;
+	uint32 target_uid;
+	uint8 target_tid;
+#endif /* SUPPORT_SET_TID */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 25))
+	struct mutex ndev_op_sync;
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 25)) */
 } dhd_pub_t;
 
 typedef struct {
@@ -1617,6 +1636,7 @@ typedef struct ecountersv2_processed_xtlv_list_elt {
  * bus_hdrlen specifies required headroom for bus module header.
  */
 extern dhd_pub_t *dhd_attach(osl_t *osh, struct dhd_bus *bus, uint bus_hdrlen);
+extern int dhd_attach_net(dhd_pub_t *dhdp, bool need_rtnl_lock);
 #if defined(WLP2P) && defined(WL_CFG80211)
 /* To allow attach/detach calls corresponding to p2p0 interface  */
 extern int dhd_attach_p2p(dhd_pub_t *);
@@ -1970,6 +1990,10 @@ extern int dhd_event_ifchange(struct dhd_info *dhd, struct wl_event_data_if *ife
 extern struct net_device* dhd_allocate_if(dhd_pub_t *dhdpub, int ifidx, const char *name,
 	uint8 *mac, uint8 bssidx, bool need_rtnl_lock, const char *dngl_name);
 extern int dhd_remove_if(dhd_pub_t *dhdpub, int ifidx, bool need_rtnl_lock);
+#ifdef WL_STATIC_IF
+extern s32 dhd_update_iflist_info(dhd_pub_t *dhdp, struct net_device *ndev, int ifidx,
+	uint8 *mac, uint8 bssidx, const char *dngl_name, int if_state);
+#endif /* WL_STATIC_IF */
 extern void dhd_vif_add(struct dhd_info *dhd, int ifidx, char * name);
 extern void dhd_vif_del(struct dhd_info *dhd, int ifidx);
 extern void dhd_event(struct dhd_info *dhd, char *evpkt, int evlen, int ifidx);
@@ -2312,13 +2336,44 @@ extern char fw_path2[MOD_PARAM_PATHLEN];
 #define VENDOR_PATH ""
 #endif /* ANDROID_PLATFORM_VERSION */
 
-#ifdef DHD_LEGACY_FILE_PATH
+#if defined(ANDROID_PLATFORM_VERSION)
+#if (ANDROID_PLATFORM_VERSION < 9)
+#ifdef WL_STATIC_IF
+#undef WL_STATIC_IF
+#endif /* WL_STATIC_IF */
+#ifdef WL_STATIC_IFNAME_PREFIX
+#undef WL_STATIC_IFNAME_PREFIX
+#endif /* WL_STATIC_IFNAME_PREFIX */
+#endif /* ANDROID_PLATFORM_VERSION < 9 */
+#endif /* ANDROID_PLATFORM_VERSION */
+
+#if defined(DHD_LEGACY_FILE_PATH)
 #define PLATFORM_PATH	"/data/"
 #elif defined(PLATFORM_SLP)
 #define PLATFORM_PATH	"/opt/etc/"
 #else
-#define PLATFORM_PATH	"/data/misc/conn/"
+#if defined(ANDROID_PLATFORM_VERSION)
+#if (ANDROID_PLATFORM_VERSION >= 9)
+#define PLATFORM_PATH	"/data/vendor/conn/"
+#define DHD_MAC_ADDR_EXPORT
+#define DHD_ADPS_BAM_EXPORT
+#define DHD_EXPORT_CNTL_FILE
+#define DHD_SOFTAP_DUAL_IF_INFO
+/* ANDROID P(9.0) and later, always use single nvram file */
+#ifndef DHD_USE_SINGLE_NVRAM_FILE
+#define DHD_USE_SINGLE_NVRAM_FILE
+#endif /* !DHD_USE_SINGLE_NVRAM_FILE */
+#else
+#define PLATFORM_PATH   "/data/misc/conn/"
+#endif /* ANDROID_PLATFORM_VERSION >= 9 */
+#else
+#define PLATFORM_PATH   "/data/misc/conn/"
+#endif /* ANDROID_PLATFORM_VERSION */
 #endif /* DHD_LEGACY_FILE_PATH */
+
+#ifdef DHD_MAC_ADDR_EXPORT
+extern struct ether_addr sysfs_mac_addr;
+#endif /* DHD_MAC_ADDR_EXPORT */
 
 /* Flag to indicate if we should download firmware on driver load */
 extern uint dhd_download_fw_on_driverload;
@@ -2340,6 +2395,10 @@ extern int dhd_write_macaddr(struct ether_addr *mac);
 static INLINE int dhd_write_macaddr(struct ether_addr *mac) { return 0; }
 #endif /* WRITE_MACADDR */
 #ifdef USE_CID_CHECK
+#define MAX_VNAME_LEN		64
+#ifdef DHD_EXPORT_CNTL_FILE
+extern char cidinfostr[MAX_VNAME_LEN];
+#endif /* DHD_EXPORT_CNTL_FILE */
 extern int dhd_check_module_cid(dhd_pub_t *dhdp);
 extern char *dhd_get_cid_info(unsigned char *vid, int vid_length);
 #else
@@ -2479,6 +2538,20 @@ enum {
 	PARAM_LAST_VALUE
 };
 extern int sec_get_param_wfa_cert(dhd_pub_t *dhd, int mode, uint* read_val);
+#ifdef DHD_EXPORT_CNTL_FILE
+#define VALUENOTSET 0xFFFFFFFFu
+extern uint32 bus_txglom;
+extern uint32 roam_off;
+#ifdef USE_WL_FRAMEBURST
+extern uint32 frameburst;
+#endif /* USE_WL_FRAMEBURST */
+#ifdef USE_WL_TXBF
+extern uint32 txbf;
+#endif /* USE_WL_TXBF */
+#ifdef PROP_TXSTATUS
+extern uint32 proptx;
+#endif /* PROP_TXSTATUS */
+#endif /* DHD_EXPORT_CNTL_FILE */
 #endif /* USE_WFA_CERT_CONF */
 
 #define dhd_add_flowid(pub, ifidx, ac_prio, ea, flowid)  do {} while (0)
@@ -2764,6 +2837,10 @@ extern int dhd_stop_timesync_timer(dhd_pub_t *pub);
 void dhd_pktid_error_handler(dhd_pub_t *dhdp);
 #endif /* DHD_PKTID_AUDIT_ENABLED */
 
+#ifdef DHD_MAP_PKTID_LOGGING
+extern void dhd_pktid_logging_dump(dhd_pub_t *dhdp);
+#endif /* DHD_MAP_PKTID_LOGGING */
+
 #ifdef DHD_PCIE_RUNTIMEPM
 extern bool dhd_runtimepm_state(dhd_pub_t *dhd);
 extern bool dhd_runtime_bus_wake(struct dhd_bus *bus, bool wait, void *func_addr);
@@ -2844,8 +2921,13 @@ int dhd_check_valid_ie(dhd_pub_t *dhdp, uint8 *buf, int len);
 uint16 dhd_prot_get_ioctl_trans_id(dhd_pub_t *dhdp);
 
 #ifdef SET_PCIE_IRQ_CPU_CORE
-extern void dhd_set_irq_cpucore(dhd_pub_t *dhdp, int set);
-extern void set_irq_cpucore(unsigned int irq, int set);
+enum {
+	PCIE_IRQ_AFFINITY_OFF = 0,
+	PCIE_IRQ_AFFINITY_BIG_CORE_ANY,
+	PCIE_IRQ_AFFINITY_BIG_CORE_EXYNOS,
+	PCIE_IRQ_AFFINITY_LAST
+};
+extern void dhd_set_irq_cpucore(dhd_pub_t *dhdp, int affinity_cmd);
 #endif /* SET_PCIE_IRQ_CPU_CORE */
 #if defined(DHD_HANG_SEND_UP_TEST)
 extern void dhd_make_hang_with_reason(struct net_device *dev, const char *string_num);
@@ -2930,6 +3012,16 @@ typedef struct _dhd_dump_file_manage {
 
 extern void dhd_dump_file_manage_enqueue(dhd_pub_t *dhd, char *dump_path, char *fname);
 #endif /* DHD_DUMP_MNGR */
+#ifdef DHD_8021X_DUMP
+extern void dhd_dump_eapol_4way_message(char *ifname, unsigned char *dump_data, bool direction);
+#endif /* DHD_8021X_DUMP */
+
+#ifdef PKT_FILTER_SUPPORT
+extern void dhd_pktfilter_offload_set(dhd_pub_t * dhd, char *arg);
+extern void dhd_pktfilter_offload_enable(dhd_pub_t * dhd, char *arg, int enable, int master_mode);
+extern void dhd_pktfilter_offload_delete(dhd_pub_t *dhd, int id);
+#endif // endif
+
 extern uint32 wlreg_l;
 extern uint32 wlreg_h;
 
@@ -2942,5 +3034,17 @@ extern int dhd_d2h_h2d_ring_dump(dhd_pub_t *dhd, void *file, unsigned long *file
 #endif /* DHD_DUMP_PCIE_RINGS */
 #define HD_PREFIX_SIZE  2   /* hexadecimal prefix size */
 #define HD_BYTE_SIZE    2   /* hexadecimal byte size */
+extern void dhd_cleanup_if(struct net_device *net);
 
+#ifdef SUPPORT_SET_TID
+enum dhd_set_tid_mode {
+	/* Disalbe changing TID */
+	SET_TID_OFF = 0,
+	/* Change TID for all UDP frames */
+	SET_TID_ALL_UDP,
+	/* Change TID for UDP frames based on UID */
+	SET_TID_BASED_ON_UID
+};
+extern void dhd_set_tid_based_on_uid(dhd_pub_t *dhdp, void *pkt);
+#endif /* SUPPORT_SET_TID */
 #endif /* _dhd_h_ */

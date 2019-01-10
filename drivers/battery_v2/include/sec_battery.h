@@ -194,6 +194,8 @@ struct sec_battery_info {
 	bool is_vbatovlo;
 	bool is_abnormal_temp;
 
+	bool revise_temp_value;
+
 	bool safety_timer_set;
 	bool lcd_status;
 	bool skip_swelling;
@@ -203,6 +205,7 @@ struct sec_battery_info {
 	int status;
 	int health;
 	bool present;
+	unsigned int charger_mode;
 
 	int voltage_now;		/* cell voltage (mV) */
 	int voltage_avg;		/* average voltage (mV) */
@@ -386,7 +389,6 @@ struct sec_battery_info {
 	int test_mode;
 	bool factory_mode;
 	bool store_mode;
-	bool slate_mode;
 
 	/* MTBF test for CMCC */
 	bool is_hc_usb;

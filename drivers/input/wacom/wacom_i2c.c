@@ -750,6 +750,15 @@ bool wacom_get_status_data(struct wacom_i2c *wac_i2c, char *data)
 	rdy = data[0] & 0x80;
 	tsp = data[12] & 0x01;
 
+	if (wac_i2c->pdata->table_swap && data[0] == TABLE_SWAP_DATA &&
+			data[2] == 0 && data[3] == 0 && data[4] == 0) {
+		wac_i2c->dp_connect_state = data[1];
+		input_info(true, &client->dev,
+			   "%s: usb typec DP %sconnected\n",
+			   __func__, wac_i2c->dp_connect_state ? "" : "dis");
+		return false;
+	}
+
 	/* Noise status : 11 11 = High noise, 22 22 = Low noise */
 	if (data[0] == 0x0F) {
 		input_info(true, &client->dev,
@@ -983,6 +992,7 @@ int wacom_i2c_coord(struct wacom_i2c *wac_i2c)
 		input_info(true, &client->dev,
 			   "%s: usb typec DP %sconnected\n",
 			   __func__, wac_i2c->dp_connect_state ? "" : "dis");
+		return 0;
 	}
 
 	if (data[0] == 0x0F) {
@@ -2020,11 +2030,16 @@ static int wacom_i2c_input_open(struct input_dev *dev)
 		   dev->name);
 
 #ifdef CONFIG_SEC_FACTORY
-	if (wac_i2c->epen_blocked){
+	if (wac_i2c->epen_blocked) {
 		input_err(true, &wac_i2c->client->dev, "%s : FAC epen_blocked SKIP!!\n", __func__);
 		return ret;
 	}
 #endif
+
+	if (!wac_i2c->probing_done) {
+		input_err(true, &wac_i2c->client->dev, "%s : not finished probing\n", __func__);
+		return ret;
+	}
 
 	wacom_wakeup_sequence(wac_i2c);
 
@@ -2035,15 +2050,20 @@ static void wacom_i2c_input_close(struct input_dev *dev)
 {
 	struct wacom_i2c *wac_i2c = input_get_drvdata(dev);
 
+	input_info(true, &wac_i2c->client->dev, "%s(%s)\n", __func__,
+		  dev->name);
+
 #ifdef CONFIG_SEC_FACTORY
-	if (wac_i2c->epen_blocked){
+	if (wac_i2c->epen_blocked) {
 		input_err(true, &wac_i2c->client->dev, "%s : FAC epen_blocked SKIP!!\n", __func__);
 		return;
 	}
 #endif
 
-	input_info(true, &wac_i2c->client->dev, "%s(%s)\n", __func__,
-		  dev->name);
+	if (!wac_i2c->probing_done) {
+		input_err(true, &wac_i2c->client->dev, "%s : not finished probing\n", __func__);
+		return;
+	}
 
 	wacom_sleep_sequence(wac_i2c);
 }
@@ -2544,6 +2564,7 @@ int wacom_fw_update(struct wacom_i2c *wac_i2c, u8 fw_update_way, bool bforced)
 		} else if (fw_ver_ic > wac_i2c->fw_ver_file) {
 			input_info(true, &client->dev,
 				   "dont need to update fw\n");
+			wac_i2c->probing_done = true;
 			goto out_update_fw;
 		}
 
@@ -2577,10 +2598,10 @@ static void wacom_i2c_update_work(struct work_struct *work)
 	int ret = 0;
 	int retry = 3;
 
+	wake_lock(&wac_i2c->fw_wakelock);
+
 	if (wac_i2c->fw_update_way == FW_NONE)
 		goto end_fw_update;
-
-	wake_lock(&wac_i2c->fw_wakelock);
 
 	/* CRC Check */
 	if (wac_i2c->do_crc_check) {
@@ -2589,7 +2610,7 @@ static void wacom_i2c_update_work(struct work_struct *work)
 		ret = wacom_checksum(wac_i2c);
 		if (ret) {
 			input_info(true, &client->dev, "crc ok, do not update\n");
-			goto err_update_fw;
+			goto end_fw_update;
 		}
 
 		input_info(true, &client->dev, "crc err, do update\n");
@@ -2609,7 +2630,7 @@ static void wacom_i2c_update_work(struct work_struct *work)
 	if (ret) {
 		feature->update_status = FW_UPDATE_FAIL;
 		feature->fw_version = 0;
-		goto err_update_fw;
+		goto end_fw_update;
 	}
 
 	ret = wacom_i2c_query(wac_i2c);
@@ -2617,13 +2638,11 @@ static void wacom_i2c_update_work(struct work_struct *work)
 		input_info(true, &client->dev, "failed to query to IC(%d)\n",
 			   ret);
 		feature->update_status = FW_UPDATE_FAIL;
-		goto err_update_fw;
+		goto end_fw_update;
 	}
 
 	feature->update_status = FW_UPDATE_PASS;
 
-err_update_fw:
-	wake_unlock(&wac_i2c->fw_wakelock);
 end_fw_update:
 	wacom_i2c_unload_fw(wac_i2c);
 #ifndef CONFIG_SEC_FACTORY
@@ -2631,6 +2650,10 @@ end_fw_update:
 	if (ret)
 		input_err(true, &client->dev, "open test check failed\n");
 #endif
+
+	wac_i2c->probing_done = true;
+
+	wake_unlock(&wac_i2c->fw_wakelock);
 
 	wacom_enable_irq(wac_i2c, true);
 	wacom_enable_pdct_irq(wac_i2c, true);
@@ -2767,7 +2790,7 @@ static void wacom_usb_typec_nb_register_work(struct work_struct *work)
 
 	ret = manager_notifier_register(&wac_i2c->typec_nb,
 					wacom_usb_typec_notification_cb,
-					MANAGER_NOTIFY_CCIC_DP);
+					MANAGER_NOTIFY_CCIC_WACOM);
 	if (ret) {
 		count++;
 		schedule_delayed_work(&wac_i2c->typec_nb_reg_work, msecs_to_jiffies(10));
